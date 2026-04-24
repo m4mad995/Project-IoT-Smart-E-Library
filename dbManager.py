@@ -4,10 +4,17 @@ from datetime import datetime # unuk tgl jatuh tempo dan perhitungan denda
 
 class DBManager:
     def __init__(self):
-        # Path harus sesuai dengan lokasi file .db yang dibuat app_db.py
-        self.db_path = 'database/perpustakaan_smart.db'
+        # 1. Dapatkan lokasi folder di mana file dbManager.py ini berada
+        base_dir = os.path.dirname(os.path.abspath(__file__))
         
-        conn = None
+        # 2. Gabungkan secara absolut ke folder database
+        # Ini menjamin Python selalu menunjuk ke folder yang benar
+        self.db_path = os.path.join(base_dir, 'database', 'perpustakaan_smart.db')
+        
+        # Debug: Print ini untuk memastikan jalur yang dibaca aplikasi sudah benar
+        print(f"Database aktif di: {self.db_path}")
+        
+        self.conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             # Patch lama: Tambah status denda
@@ -117,33 +124,32 @@ class DBManager:
             print(f"Error Hapus Calon: {e}")
             
     def aktivasi_anggota_baru(self, nis, rfid_id):
-        """Memindahkan data dari calon ke anggota tetap"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # 1. Ambil data dari calon_anggota
             cursor.execute("SELECT nama, prodi FROM calon_anggota WHERE nis = ?", (nis,))
             data = cursor.fetchone()
             
             if data:
                 nama, prodi = data
-                # 2. Masukkan ke tabel anggota (Role otomatis 'USER')
+                # Simpan ke tabel anggota
                 cursor.execute("""
                     INSERT INTO anggota (rfid_id, nama, prodi, role) 
                     VALUES (?, ?, ?, 'USER')
                 """, (rfid_id, nama, prodi))
                 
-                # 3. Hapus dari tabel calon_anggota
-                cursor.execute("DELETE FROM calon_anggota WHERE nis = ?", (nis,))
+                # AMBIL ID BARU (Angka)
+                user_id = cursor.lastrowid 
                 
+                cursor.execute("DELETE FROM calon_anggota WHERE nis = ?", (nis,))
                 conn.commit()
                 conn.close()
-                return True
-            return False
+                return user_id # Mengembalikan angka ID
+            return None
         except Exception as e:
             print(f"Error Aktivasi: {e}")
-            return False
+            return None
 
     def add_member(self, rfid, nama, prodi, foto_path):
         """Menambah anggota baru dengan default role USER"""

@@ -294,7 +294,7 @@ class PageMenu(ctk.CTkFrame):
         self.frame_nav = ctk.CTkFrame(self, fg_color="transparent")
         self.frame_nav.pack(pady=10)
         self.btn_admin_buku = ctk.CTkButton(self.frame_nav, text="📚 Kelola Buku", width=160, height=40, command=lambda: self.controller.show_frame("PageAdminBuku"))
-        self.btn_admin_anggota = ctk.CTkButton(self.frame_nav, text="👥 Kelola Anggota", width=160, height=40, command=lambda: self.controller.show_frame("PageAdminDaftar"))
+        self.btn_admin_anggota = ctk.CTkButton(self.frame_nav, text="👥 Aktivasi Anggota", width=160, height=40, command=lambda: self.controller.show_frame("PageAdminDaftar"))
         self.btn_admin_laporan = ctk.CTkButton(self.frame_nav, text="📊 Laporan", width=160, height=40, command=lambda: self.controller.show_frame("PageAdminLaporan"))
         self.btn_admin_denda = ctk.CTkButton(self.frame_nav, text="💸 Kelola Denda", width=160, height=40, command=lambda: self.controller.show_frame("PageAdminDenda"))
         self.btn_pinjam = ctk.CTkButton(self.frame_nav, text="📥 Pinjam Buku", width=180, height=40, command=lambda: self.controller.show_frame("PagePeminjaman"))
@@ -413,67 +413,73 @@ class PageAdminDaftar(ctk.CTkFrame):
             btn_foto.grid(row=idx+1, column=3, padx=20, pady=5)
 
     def mulai_aktivasi_wajah(self, nis, nama, prodi):
-        # Simpan data yang akan difoto ke controller agar bisa diakses PageFaceAuth
-        # Kita perlu sedikit memodifikasi alur PageFaceAuth atau membuat sub-proses
         import tkinter.messagebox as messagebox
-        if messagebox.askyesno("Konfirmasi", f"Siapkan kamera untuk {nama}?"):
-            # Logika: Admin mengambil foto wajah, lalu data pindah ke tabel anggota
-            # Untuk sementara kita panggil fungsi ambil foto (nanti kita integrasikan lebih dalam)
+        # Tanya dulu, biar admin siap
+        if messagebox.askyesno("Konfirmasi", f"Mulai proses aktivasi untuk {nama}?\n\nAdmin harus menyiapkan kartu RFID baru."):
             self.proses_training_dan_aktifkan(nis, nama, prodi)
 
     def proses_training_dan_aktifkan(self, nis, nama, prodi):
         import tkinter.messagebox as messagebox
         
-        # 1. Minta Admin Scan Kartu RFID baru untuk dipasangkan ke wajah ini
+        # 1. Minta Admin Scan Kartu RFID fisik siswa
         rfid_baru = ctk.CTkInputDialog(text=f"Scan Kartu RFID untuk {nama}:", title="Link RFID").get_input()
         
         if not rfid_baru:
             return
 
-        # 2. Buka Kamera untuk ambil dataset wajah
-        cap = cv2.VideoCapture(0)
-        count = 0
+        # 2. UPDATE DATABASE DULU untuk mendapatkan User ID (Angka)
+        # Pastikan fungsi aktivasi_anggota_baru di dbManager sudah mengembalikan cursor.lastrowid
+        user_id = self.controller.db.aktivasi_anggota_baru(nis, rfid_baru)
         
-        # Buat folder dataset jika belum ada
-        if not os.path.exists("dataset"):
-            os.makedirs("dataset")
-
-        messagebox.showinfo("Instruksi", "Kamera akan terbuka. Mohon hadap kamera sampai proses selesai (20 gambar).")
-
-        while True:
-            ret, frame = cap.read()
-            if not ret: break
+        if user_id:
+            # 3. Buka Kamera untuk ambil dataset wajah
+            cap = cv2.VideoCapture(0)
+            count = 0
             
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self.controller.face_cascade.detectMultiScale(gray, 1.3, 5)
-            
-            for (x, y, w, h) in faces:
-                count += 1
-                # Simpan foto dengan format: User.RFID.Count.jpg
-                file_path = f"dataset/User.{rfid_baru}.{count}.jpg"
-                cv2.imwrite(file_path, gray[y:y+h, x:x+w])
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
-                cv2.putText(frame, f"Capturing: {count}/20", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            if not os.path.exists("dataset"):
+                os.makedirs("dataset")
 
-            cv2.imshow("Aktivasi Wajah - " + nama, frame)
-            
-            # Ambil 20 foto saja agar cepat
-            if cv2.waitKey(1) & 0xFF == ord('q') or count >= 20:
-                break
-        
-        cap.release()
-        cv2.destroyAllWindows()
+            messagebox.showinfo("Instruksi", f"Data berhasil diaktifkan dengan ID: {user_id}.\nKamera akan terbuka, mohon hadap kamera.")
 
-        if count >= 20:
-            # 3. Simpan ke Database
-            sukses = self.controller.db.aktivasi_anggota_baru(nis, rfid_baru)
-            if sukses:
-                messagebox.showinfo("Berhasil", f"Akun {nama} aktif! Silakan jalankan Training LBPH (jika ada menu training).")
+            while True:
+                ret, frame = cap.read()
+                if not ret: break
+                
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = self.controller.face_cascade.detectMultiScale(gray, 1.3, 5)
+                
+                for (x, y, w, h) in faces:
+                    count += 1
+                    
+                    # --- OPTIMASI: RESIZE WAJAH AGAR RINGAN ---
+                    # Kita potong area wajah saja dan perkecil ukurannya (misal 200x200)
+                    roi_gray = gray[y:y+h, x:x+w]
+                    roi_gray = cv2.resize(roi_gray, (200, 200)) 
+                    
+                    # Simpan menggunakan format: User.[ID_ANGKA].[COUNT].jpg
+                    file_path = f"dataset/User.{user_id}.{count}.jpg"
+                    cv2.imwrite(file_path, roi_gray)
+                    
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+                    cv2.putText(frame, f"Foto: {count}/20", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                cv2.imshow("Aktivasi Wajah - " + nama, frame)
+                
+                # Kita ambil 20 foto (bisa dikurangi ke 15 jika mau lebih cepat)
+                if cv2.waitKey(1) & 0xFF == ord('q') or count >= 20:
+                    break
+            
+            cap.release()
+            cv2.destroyAllWindows()
+
+            if count >= 20:
+                messagebox.showinfo("Berhasil", f"Wajah {nama} berhasil direkam!\n\nPENTING: Klik tombol 'Mulai Training Sistem' agar siswa bisa login.")
                 self.refresh_daftar()
             else:
-                messagebox.showerror("Error", "Gagal memproses ke database.")
+                messagebox.showwarning("Peringatan", "Foto kurang dari 20, mungkin pengenalan wajah akan kurang akurat.")
+                self.refresh_daftar()
         else:
-            messagebox.showwarning("Gagal", "Foto tidak cukup, proses dibatalkan.")
+            messagebox.showerror("Error", "Gagal mengaktifkan data di Database.")
             
     def klik_training(self):
         hasil = self.controller.jalankan_training_wajah()
@@ -1093,7 +1099,7 @@ class SmartLibraryApp(ctk.CTk):
     def jalankan_training_wajah(self):
         import numpy as np
         recognizer = cv2.face.LBPHFaceRecognizer_create()
-        detector = self.face_cascade
+        # Kita tidak butuh detector lagi di sini karena gambar di dataset sudah berbentuk wajah (hasil crop)
         
         path = 'dataset'
         if not os.path.exists(path):
@@ -1104,29 +1110,27 @@ class SmartLibraryApp(ctk.CTk):
         ids = []
 
         for imagePath in imagePaths:
-            PIL_img = Image.open(imagePath).convert('L') # konversi ke grayscale
-            img_numpy = np.array(PIL_img, 'uint8')
-            
-            # Format file kita: User.RFID.Count.jpg
-            # Kita ambil RFID sebagai ID unik untuk training
-            rfid_str = os.path.split(imagePath)[-1].split(".")[1]
-            # Karena LBPH butuh ID angka (integer), kita konversi RFID ke angka 
-            # (Jika RFID-mu mengandung huruf, kita perlu cara mapping lain)
             try:
-                id_numeric = int(rfid_str) 
-            except:
-                continue
+                # Buka gambar dan pastikan dalam mode L (Grayscale)
+                PIL_img = Image.open(imagePath).convert('L') 
+                img_numpy = np.array(PIL_img, 'uint8')
+                
+                # Format file baru: User.[USER_ID].[COUNT].jpg
+                # Ambil bagian USER_ID (indeks ke-1)
+                user_id = int(os.path.split(imagePath)[-1].split(".")[1])
 
-            faces = detector.detectMultiScale(img_numpy)
-            for (x, y, w, h) in faces:
-                faceSamples.append(img_numpy[y:y+h, x:x+w])
-                ids.append(id_numeric)
+                faceSamples.append(img_numpy)
+                ids.append(user_id)
+            except Exception as e:
+                print(f"Gagal memproses {imagePath}: {e}")
+                continue
 
         if len(faceSamples) > 0:
             recognizer.train(faceSamples, np.array(ids))
-            recognizer.write('trainer.yml') # Menyimpan hasil belajar sistem
-            return f"Sukses! {len(set(ids))} wajah telah dilatih."
-        return "Gagal: Tidak ada data wajah untuk dilatih."
+            # Simpan hasil belajar ke file trainer.yml
+            recognizer.write('trainer.yml') 
+            return f"Sukses! {len(set(ids))} wajah anggota telah dikenali sistem."  
+        return "Gagal: Tidak ada data wajah yang valid."
 
     def show_frame(self, page_name):
         frame = self.frames[page_name]
