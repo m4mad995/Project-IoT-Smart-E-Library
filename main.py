@@ -187,88 +187,106 @@ class PageFaceAuth(ctk.CTkFrame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        self.cap = None
-        self.is_verifying = False # Flag agar tidak spam proses AI
         
-        ctk.CTkLabel(self, text="VERIFIKASI WAJAH", font=("Arial", 20, "bold")).pack(pady=10)
-        self.status_verif = ctk.CTkLabel(self, text="Mencari wajah...", font=("Arial", 14))
-        self.status_verif.pack(pady=5)
+        # --- FLAG BARU --- 
+        # Untuk mengunci deteksi agar tidak berulang saat delay berjalan
+        self.login_berhasil = False 
+        
+        ctk.CTkLabel(self, text="SCAN WAJAH UNTUK LOGIN", font=("Arial", 24, "bold")).pack(pady=20)
+        
+        self.video_label = ctk.CTkLabel(self, text="")
+        self.video_label.pack(pady=10)
+        
+        ctk.CTkButton(self, text="Kembali ke Menu", command=self.batal_login).pack(pady=10)
 
-        self.video_label = ctk.CTkLabel(self, text="") 
-        self.video_label.pack()
+        self.recognizer = cv2.face.LBPHFaceRecognizer_create()
+        if os.path.exists('trainer.yml'):
+            self.recognizer.read('trainer.yml')
         
-        # Tombol manual jika otomatis gagal
-        ctk.CTkButton(self, text="Coba Verifikasi Manual", command=self.manual_verify).pack(pady=10)
-        ctk.CTkButton(self, text="Batal", fg_color="red", command=self.cancel_auth).pack()
+        self.cap = None
 
     def on_show(self):
-        self.cap = cv2.VideoCapture(0)
-        self.is_verifying = True 
-        self.update_video()
-
-    def update_video(self):
-        if self.cap and self.is_verifying:
-            ret, frame = self.cap.read()
-            if ret:
-                frame = cv2.flip(frame, 1)
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = self.controller.face_cascade.detectMultiScale(gray, 1.3, 5)
-                
-                for (x, y, w, h) in faces:
-                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    
-                    # Panggil fungsi verifikasi (Harus pakai self. karena ini method kelas)
-                    self.auto_verify(gray[y:y+h, x:x+w])
-
-                # Update Tampilan
-                img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img_pil = Image.fromarray(img_rgb)
-                ctk_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(480, 360))
-                
-                self.video_label.configure(image=ctk_img, text="")
-                self.after(10, self.update_video)
-
-    def auto_verify(self, wajah_kamera):
-        if not self.controller.current_user: return
+        # Reset status tiap kali halaman ini dibuka ulang
+        self.login_berhasil = False 
         
-        if wajah_kamera is None or wajah_kamera.size == 0:
-            return 
-
-        try:
-            path_ref = self.controller.current_user[3] 
-            img_ref = cv2.imread(path_ref, cv2.IMREAD_GRAYSCALE)
+        if not os.path.exists('trainer.yml'):
+            import tkinter.messagebox as messagebox
+            messagebox.showerror("Error", "Sistem belum ditraining! Hubungi Admin.")
+            self.controller.show_frame("PageLanding")
+            return
             
-            if img_ref is not None:
-                img_ref = cv2.equalizeHist(img_ref)
-                wajah_kamera = cv2.equalizeHist(wajah_kamera)
-                wajah_kamera_resized = cv2.resize(wajah_kamera, (img_ref.shape[1], img_ref.shape[0]))
+        self.cap = cv2.VideoCapture(0)
+        self.scan_wajah()
+
+    def tampilkan_ke_layar(self, frame):
+        """Fungsi pembantu untuk update gambar ke UI"""
+        rgb_img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb_img)
+        imgtk = ctk.CTkImage(light_image=img, dark_image=img, size=(640, 480))
+        self.video_label.configure(image=imgtk)
+        self.video_label.image = imgtk
+
+    def scan_wajah(self):
+        if self.cap is None or not self.cap.isOpened():
+            return
+
+        # Jika sudah login, stop looping kamera, biarkan gambar terakhir membeku
+        if self.login_berhasil:
+            return
+
+        ret, frame = self.cap.read()
+        if ret:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = self.controller.face_cascade.detectMultiScale(gray, 1.3, 5)
+
+            for (x, y, w, h) in faces:
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                 
-                res = cv2.matchTemplate(wajah_kamera_resized, img_ref, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, _ = cv2.minMaxLoc(res)
-                score = max(0, max_val) 
-
-                if score > 0.00001:
-                    self.is_verifying = False
-                    self.status_verif.configure(text="BERHASIL!", text_color="green")
-                    self.after(1000, self.success_auth)
+                id_hasil, confidence = self.recognizer.predict(gray[y:y+h, x:x+w])
+                
+                if confidence < 65: 
+                    user_data = self.controller.db.get_anggota_by_id(id_hasil)
+                    
+                    if user_data:
+                        nama_user = user_data[1]
+                        
+                        # Tulis teks yang keren
+                        cv2.putText(frame, f"Akses Diberikan:", (x, y-35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        cv2.putText(frame, f"{nama_user}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                        
+                        # 1. Kunci sistem agar tidak scan wajah ini berkali-kali
+                        self.login_berhasil = True 
+                        
+                        # 2. Update UI dengan frame yang ada tulisan "Akses Diberikan"-nya
+                        self.tampilkan_ke_layar(frame)
+                        
+                        # 3. Beri jeda 2 detik (2000 ms), BARU jalankan sukses_login
+                        self.after(2000, lambda: self.sukses_login(user_data))
+                        return 
                 else:
-                    self.status_verif.configure(text=f"Kemiripan: {int(score*100)}%", text_color="orange")
-        except Exception as e:
-            print(f"Error AI: {e}")
+                    cv2.putText(frame, "Tidak Dikenali", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-    def manual_verify(self):
-        self.status_verif.configure(text="Mencoba verifikasi ulang...", text_color="white")
+            # Update UI jika belum berhasil login
+            self.tampilkan_ke_layar(frame)
 
-    def cancel_auth(self):
-        if self.cap: self.cap.release()
-        self.is_verifying = False
-        self.controller.show_frame("PageStandby")
+        # Ulangi fungsi setiap 10ms jika belum berhasil login
+        if not self.login_berhasil:
+            self.after(10, self.scan_wajah)
 
-    def success_auth(self):
+    def sukses_login(self, user_data):
         if self.cap:
             self.cap.release()
-            self.cap = None
-        self.controller.show_frame("PageMenu")
+        cv2.destroyAllWindows()
+        
+        self.controller.current_user = user_data
+        self.controller.show_frame("PageMenu") 
+
+    def batal_login(self):
+        self.login_berhasil = True # Hentikan loop kamera
+        if self.cap:
+            self.cap.release()
+        cv2.destroyAllWindows()
+        self.controller.show_frame("PageLanding")
 
 # --- PAGE: MENU UTAMA (BERBAGI UNTUK ADMIN & USER) ---
 class PageMenu(ctk.CTkFrame):

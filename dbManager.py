@@ -523,5 +523,21 @@ class DBManager:
             print(f"Error Hitung Terblokir: {e}")
 
         return total_stok, total_judul, total_anggota, buku_dipinjam, anggota_terblokir
-    
-    
+  
+    #fitur deteksi wajah login berdasarkan ID Angka (ROWID) yang otomatis di-generate SQLite saat insert anggota baru
+    def get_anggota_by_id(self, id_user):
+        """Mengambil data anggota berdasarkan ID Angka dari deteksi wajah"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Catatan: Sesuaikan 'id_user' dengan nama kolom Primary Key di tabel anggota kamu.
+            # Jika tidak ada kolom khusus, SQLite punya kolom bawaan bernama ROWID.
+            cursor.execute("SELECT rfid_id, nama, prodi, role FROM anggota WHERE ROWID = ?", (id_user,))
+            data = cursor.fetchone()
+            
+            conn.close()
+            return data # Mengembalikan tuple (rfid_id, nama, prodi, role)
+        except Exception as e:
+            print(f"Error Get Anggota by ID: {e}")
+            return None
