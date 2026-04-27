@@ -299,14 +299,15 @@ class PageMenu(ctk.CTkFrame):
 
         # --- Frame Stats (Sekarang Konfigurasi 5 Kolom) ---
         self.frame_stats = ctk.CTkFrame(self, fg_color="transparent")
-        self.frame_stats.grid_columnconfigure((0, 1, 2, 3, 4), weight=1) # Tambah kolom ke-4
+        self.frame_stats.grid_columnconfigure((0, 1, 2, 3, 4, 5), weight=1) # Tambah kolom ke-5
 
-        # Buat 5 Kartu
+        # Buat 6 Kartu
         self.lbl_tot_stok = self.buat_kartu(self.frame_stats, "Total Stok", "0", "#3498db", 0)
         self.lbl_tot_judul = self.buat_kartu(self.frame_stats, "Total Judul", "0", "#9b59b6", 1) # Baru! Ungu
         self.lbl_tot_anggota = self.buat_kartu(self.frame_stats, "Anggota", "0", "#2ecc71", 2)
         self.lbl_dipinjam = self.buat_kartu(self.frame_stats, "Dipinjam", "0", "#f39c12", 3)
         self.lbl_terblokir = self.buat_kartu(self.frame_stats, "Terblokir", "0", "#e74c3c", 4)
+        self.lbl_antrean = self.buat_kartu(self.frame_stats, "Antrean_Aktivasi", "0", "#16a085", 5)
 
         # ... (Sisa kode frame_nav dan tombol-tombol tetap sama seperti sebelumnya) ...
         self.frame_nav = ctk.CTkFrame(self, fg_color="transparent")
@@ -349,12 +350,13 @@ class PageMenu(ctk.CTkFrame):
                 # Ambil data dari database (5 nilai)
                 stats = self.controller.db.get_dashboard_stats()
                 if stats:
-                    stok, judul, anggota, pinjam, blokir = stats
+                    stok, judul, anggota, pinjam, blokir, antrean_aktivasi = stats
                     self.lbl_tot_stok.configure(text=str(stok))
                     self.lbl_tot_judul.configure(text=str(judul))
                     self.lbl_tot_anggota.configure(text=str(anggota))
                     self.lbl_dipinjam.configure(text=str(pinjam))
                     self.lbl_terblokir.configure(text=str(blokir))
+                    self.lbl_antrean.configure(text=str(antrean_aktivasi))
 
                 self.btn_admin_buku.grid(row=0, column=0, padx=5, pady=10)
                 self.btn_admin_anggota.grid(row=0, column=1, padx=5, pady=10)

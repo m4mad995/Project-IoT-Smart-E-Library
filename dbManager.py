@@ -480,12 +480,13 @@ class DBManager:
             return False
         
     def get_dashboard_stats(self):
-        """Mengambil rekapitulasi data (5 Statistik)"""
+        """Mengambil rekapitulasi data (Sekarang 6 Statistik)"""
         total_stok = 0
         total_judul = 0
         total_anggota = 0
         buku_dipinjam = 0
         anggota_terblokir = 0
+        antrean_aktivasi = 0 # <-- 1. Variabel Baru Disiapkan
 
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -513,16 +514,24 @@ class DBManager:
         except Exception as e:
             print(f"Error Hitung Dipinjam: {e}")
 
-        conn.close()
+        # 5. Hitung Antrean Aktivasi
+        try:
+            cursor.execute("SELECT COUNT(*) FROM calon_anggota")
+            antrean_aktivasi = cursor.fetchone()[0]
+        except Exception as e:
+            print(f"Error Hitung Antrean: {e}")
 
-        # 4. Anggota Terblokir (dari halaman denda)
+        conn.close() # <-- Pastikan tambahan baru di atas baris ini
+
+        # 6. Anggota Terblokir (dari halaman denda)
         try:
             data_terblokir = self.get_user_terblokir()
             anggota_terblokir = len(data_terblokir) if data_terblokir else 0
         except Exception as e:
             print(f"Error Hitung Terblokir: {e}")
-
-        return total_stok, total_judul, total_anggota, buku_dipinjam, anggota_terblokir
+            
+        # --- RETURN 6 NILAI SEKARANG ---
+        return (total_stok, total_judul, total_anggota, buku_dipinjam, anggota_terblokir, antrean_aktivasi)  
   
     #fitur deteksi wajah login berdasarkan ID Angka (ROWID) yang otomatis di-generate SQLite saat insert anggota baru
     def get_anggota_by_id(self, id_user):
