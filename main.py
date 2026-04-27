@@ -307,7 +307,7 @@ class PageMenu(ctk.CTkFrame):
         self.lbl_tot_anggota = self.buat_kartu(self.frame_stats, "Anggota", "0", "#2ecc71", 2)
         self.lbl_dipinjam = self.buat_kartu(self.frame_stats, "Dipinjam", "0", "#f39c12", 3)
         self.lbl_terblokir = self.buat_kartu(self.frame_stats, "Terblokir", "0", "#e74c3c", 4)
-        self.lbl_antrean = self.buat_kartu(self.frame_stats, "Antrean_Aktivasi", "0", "#16a085", 5)
+        self.lbl_antrean = self.buat_kartu(self.frame_stats, "Antrean Aktivasi", "0", "#16a085", 5)
 
         # ... (Sisa kode frame_nav dan tombol-tombol tetap sama seperti sebelumnya) ...
         self.frame_nav = ctk.CTkFrame(self, fg_color="transparent")
@@ -536,6 +536,28 @@ class PageAdminBuku(ctk.CTkFrame):
 
         self.ent_stok = ctk.CTkEntry(form_frame, placeholder_text="Jumlah Stok")
         self.ent_stok.pack(fill="x", padx=20, pady=5)
+        
+        # --- TAMBAHAN BARU: INPUT DURASI PINJAM ---
+        frame_durasi = ctk.CTkFrame(form_frame, fg_color="transparent")
+        frame_durasi.pack(fill="x", padx=20, pady=5)
+
+        ctk.CTkLabel(frame_durasi, text="Batas Pinjam:").pack(side="left")
+
+        self.var_durasi = ctk.StringVar(value="7") # Default 7 hari
+        self.input_durasi = ctk.CTkOptionMenu(
+            frame_durasi, values=["7", "3"], 
+            variable=self.var_durasi, width=70
+        )
+        self.input_durasi.pack(side="left", padx=5)
+
+        ctk.CTkLabel(frame_durasi, text="Hari").pack(side="left")
+
+        # Tombol Info "!"
+        ctk.CTkButton(
+            frame_durasi, text="!", width=25, height=25, corner_radius=12,
+            fg_color="#f39c12", hover_color="#e67e22", font=("Arial", 12, "bold"),
+            command=self.info_durasi_pinjam
+        ).pack(side="left", padx=5)
 
         ctk.CTkButton(form_frame, text="Simpan Buku", fg_color="green", 
                       command=self.simpan_buku).pack(fill="x", padx=20, pady=20)
@@ -620,6 +642,11 @@ class PageAdminBuku(ctk.CTkFrame):
         ent_stok = ctk.CTkEntry(popup, width=320)
         ent_stok.pack(pady=5)
         ent_stok.insert(0, str(stok_lama))
+        # --- TAMBAHAN BARU DI POPUP: EDIT DURASI ---
+        ctk.CTkLabel(popup, text="Batas Pinjam:").pack(anchor="w", padx=40, pady=(10,0))
+        var_durasi_edit = ctk.StringVar(value="7") # Nanti bisa disesuaikan ambil dari DB
+        sel_durasi = ctk.CTkOptionMenu(popup, values=["7", "3"], variable=var_durasi_edit, width=100)
+        sel_durasi.pack(pady=5)
 
         def simpan_perubahan():
             j_baru = ent_judul.get()
@@ -642,13 +669,14 @@ class PageAdminBuku(ctk.CTkFrame):
         def simpan_perubahan():
             j_baru = ent_judul.get()
             p_baru = ent_penulis.get()
+            d_baru = var_durasi_edit.get() # Ambil nilai durasi baru dari popup
             try:
                 s_baru = int(ent_stok.get())
             except ValueError:
                 s_baru = 1 
                 
             if j_baru:
-                sukses = self.controller.db.update_buku(barcode, j_baru, p_baru, s_baru)
+                sukses = self.controller.db.update_buku(barcode, j_baru, p_baru, s_baru, d_baru) # Pastikan fungsi update_buku di dbManager menerima parameter durasi
                 if sukses:
                     popup.destroy() 
                     self.refresh_tabel() 
@@ -663,9 +691,10 @@ class PageAdminBuku(ctk.CTkFrame):
         penulis = self.ent_penulis.get()
         penerbit = self.ent_penerbit.get()
         stok = self.ent_stok.get()
+        durasi = self.var_durasi.get() # Ambil nilai dari dropdown durasi
 
         if barcode and judul and stok:
-            sukses = self.controller.db.add_buku(barcode, judul, penulis, penerbit, stok)
+            sukses = self.controller.db.add_buku(barcode, judul, penulis, penerbit, stok, durasi) # Pastikan fungsi add_buku di dbManager menerima parameter durasi
             if sukses:
                 # Bersihkan input
                 self.ent_barcode.delete(0, 'end')
@@ -678,7 +707,22 @@ class PageAdminBuku(ctk.CTkFrame):
 
     def hapus_buku(self, barcode):
         if self.controller.db.delete_buku(barcode):
-            self.refresh_tabel()               
+            self.refresh_tabel()      
+            
+    def info_durasi_pinjam(self):
+        import tkinter.messagebox as messagebox
+        pesan = (
+            "KRITERIA BATAS PINJAM BUKU:\n\n"
+            "📚 7 Hari (Reguler):\n"
+            "- Buku teks standar\n"
+            "- Stok lebih dari 3 eksemplar\n"
+            "- Peminatnya normal/sedang\n\n"
+            "🔥 3 Hari (Langka/High-Demand):\n"
+            "- Buku edisi terbatas / mahal\n"
+            "- Stok tinggal 1-2 eksemplar\n"
+            "- Sering diantre oleh banyak siswa"
+        )
+        messagebox.showinfo("Info Durasi Pinjam", pesan)         
 
 # --- 6. PAGE: PEMINJAMAN BUKU ---
 class PagePeminjaman(ctk.CTkFrame):

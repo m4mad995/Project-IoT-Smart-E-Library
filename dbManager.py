@@ -4,36 +4,44 @@ from datetime import datetime # unuk tgl jatuh tempo dan perhitungan denda
 
 class DBManager:
     def __init__(self):
-        # 1. Dapatkan lokasi folder di mana file dbManager.py ini berada
+        # 1. Dapatkan lokasi folder
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # 2. Gabungkan secara absolut ke folder database
-        # Ini menjamin Python selalu menunjuk ke folder yang benar
         self.db_path = os.path.join(base_dir, 'database', 'perpustakaan_smart.db')
-        
-        # Debug: Print ini untuk memastikan jalur yang dibaca aplikasi sudah benar
         print(f"Database aktif di: {self.db_path}")
         
-        self.conn = None
+        # ==========================================
+        # 2. SCRIPT AUTO-PATCH DATABASE ANTI-GAGAL
+        # ==========================================
         try:
             conn = sqlite3.connect(self.db_path)
-            # Patch lama: Tambah status denda
-            conn.execute("ALTER TABLE transaksi ADD COLUMN status_denda TEXT DEFAULT 'LUNAS'")
+            
+            # Daftar semua kolom yang mau ditambahkan
+            patch_queries = [
+                "ALTER TABLE transaksi ADD COLUMN status_denda TEXT DEFAULT 'LUNAS'",
+                "ALTER TABLE buku ADD COLUMN durasi_pinjam INTEGER DEFAULT 7",
+                "ALTER TABLE transaksi ADD COLUMN kondisi_awal TEXT DEFAULT 'Baik'",
+                "ALTER TABLE transaksi ADD COLUMN kondisi_akhir TEXT",
+                "ALTER TABLE transaksi ADD COLUMN denda_telat INTEGER DEFAULT 0",
+                "ALTER TABLE transaksi ADD COLUMN denda_rusak INTEGER DEFAULT 0",
+                "ALTER TABLE transaksi ADD COLUMN catatan_kerusakan TEXT",
+                "ALTER TABLE transaksi ADD COLUMN jatuh_tempo DATETIME",
+            ]
+            
+            # Eksekusi satu-satu
+            for q in patch_queries:
+                try:
+                    conn.execute(q)
+                except:
+                    pass # Abaikan jika kolomnya memang sudah ada
+                    
             conn.commit()
-        except:
-            pass 
-
-        try:
-            if conn is None:
-                conn = sqlite3.connect(self.db_path)
-            # PATCH BARU: Tambah durasi pinjam di tabel buku (Default 7 Hari)
-            conn.execute("ALTER TABLE buku ADD COLUMN durasi_pinjam INTEGER DEFAULT 7")
-            conn.commit()
-        except:
-            pass # Abaikan jika kolom durasi_pinjam sudah berhasil dibuat sebelumnya
-        finally:
-            if conn:
-                conn.close()
+            conn.close()
+            print("Auto-Patch Database Selesai dicek.")
+        except Exception as e:
+            print(f"Gagal koneksi patch: {e}")
+        # ==========================================
+        
+        # Lanjut ke kode inisialisasi lainnya di bawah sini (kalau ada) ...
 
     def get_member(self, rfid_id):
         """Mengambil data anggota berdasarkan RFID ID, termasuk kolom role"""
@@ -180,23 +188,26 @@ class DBManager:
     # ==========================================
     # CRUD BUKU (FUNGSI UNTUK ADMIN & USER)
     # ==========================================
-    def add_buku(self, barcode_id, judul, penulis, penerbit, stok):
-        """Menambah buku baru ke database"""
+    def add_buku(self, barcode, judul, penulis, penerbit, stok, durasi):
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO buku (barcode_id, judul, penulis, penerbit, stok) VALUES (?, ?, ?, ?, ?)",
-                (barcode_id, judul, penulis, penerbit, int(stok))
-            )
+            
+            # PERHATIKAN: Nama kolom di sini harus durasi_pinjam, BUKAN durasi
+            query = """
+                INSERT INTO buku (barcode_id, judul, penulis, penerbit, stok, durasi_pinjam) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            """
+            
+            # Di sini variabel parameter tetap menggunakan 'durasi' (tidak masalah karena ini variabel Python)
+            cursor.execute(query, (barcode, judul, penulis, penerbit, stok, durasi))
             conn.commit()
             conn.close()
             return True
-        except sqlite3.IntegrityError:
-            print("Error: Barcode/Kode Buku sudah terdaftar di sistem!")
-            return False
+            
         except Exception as e:
-            print(f"Error DB Tambah Buku: {e}")
+            # Tetap pertahankan print error ini agar kita tahu kalau ada masalah lain
+            print(f"Error DB Tambah Buku: {e}") 
             return False
 
     def get_all_buku(self):
@@ -251,7 +262,7 @@ class DBManager:
         return res
 
     def pinjam_buku(self, rfid_id, barcode_id):
-        """Mencatat transaksi pinjam dengan limit otomatis dari tabel transaksi"""
+        """Mencatat transaksi pinjam dengan limit otomatis & kondisi awal (Hybrid)"""
         conn = None
         
         # --- ATUR BATAS MAKSIMAL PINJAM DI SINI ---
@@ -273,35 +284,35 @@ class DBManager:
                 return "DIBLOKIR"
                 
             # 2. HITUNG JUMLAH BUKU YANG SEDANG DIPINJAM (LIMIT OTOMATIS)
-            # Menghitung transaksi user ini yang tgl_kembali-nya belum ada
             cursor.execute("SELECT COUNT(*) FROM transaksi WHERE rfid_id=? AND tgl_kembali IS NULL", (rfid_id,))
             sedang_dipinjam = cursor.fetchone()[0]
             
-            # Tolak jika sudah meminjam 3 buku atau lebih
             if sedang_dipinjam >= MAX_PINJAM:
                 conn.close()
-                return "LIMIT" # Kita buat status tolakan baru: "LIMIT"
+                return "LIMIT"
                 
             # 3. CEK STOK & DURASI PINJAM BUKU
             cursor.execute("SELECT stok, durasi_pinjam FROM buku WHERE barcode_id=?", (barcode_id,))
             buku = cursor.fetchone()
             
             if buku and int(buku[0]) > 0:
-                # Ambil durasi pinjam. Jika kosong, otomatis 7 hari.
+                # Ambil durasi pinjam (buku langka 3 hari, reguler 7 hari)
                 durasi = int(buku[1]) if buku[1] is not None else 7
                 
                 # Kurangi stok buku
                 cursor.execute("UPDATE buku SET stok = stok - 1 WHERE barcode_id=?", (barcode_id,))
                 
-                # CATAT TRANSAKSI DENGAN JATUH TEMPO
+                # 4. CATAT TRANSAKSI DENGAN JATUH TEMPO & KONDISI AWAL
                 try:
+                    # Tambahan Baru: Memasukkan nilai 'Baik' ke kondisi_awal
                     query_insert = f"""
-                        INSERT INTO transaksi (rfid_id, barcode_id, status_denda, tgl_pinjam, jatuh_tempo) 
-                        VALUES (?, ?, 'LUNAS', datetime('now', 'localtime'), datetime('now', 'localtime', '+{durasi} days'))
+                        INSERT INTO transaksi (rfid_id, barcode_id, status_denda, tgl_pinjam, jatuh_tempo, kondisi_awal) 
+                        VALUES (?, ?, 'LUNAS', datetime('now', 'localtime'), datetime('now', 'localtime', '+{durasi} days'), 'Baik')
                     """
                     cursor.execute(query_insert, (rfid_id, barcode_id))
-                except sqlite3.OperationalError:
-                    # Fallback jika kolom jatuh_tempo belum ada
+                except sqlite3.OperationalError as e:
+                    # Fallback jika kolom baru belum ter-patch
+                    print(f"Warning DB: {e}. Menggunakan fallback insert.")
                     cursor.execute("INSERT INTO transaksi (rfid_id, barcode_id, status_denda) VALUES (?, ?, 'LUNAS')", (rfid_id, barcode_id))
                 
                 conn.commit() 
@@ -309,7 +320,7 @@ class DBManager:
                 return "SUKSES"
                 
             conn.close()
-            return "HABIS" # Gagal jika stok buku 0
+            return "HABIS" 
             
         except Exception as e:
             print(f"🚨 Error Database Peminjaman: {e}")
