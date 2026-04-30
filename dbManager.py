@@ -25,6 +25,7 @@ class DBManager:
                 "ALTER TABLE transaksi ADD COLUMN denda_rusak INTEGER DEFAULT 0",
                 "ALTER TABLE transaksi ADD COLUMN catatan_kerusakan TEXT",
                 "ALTER TABLE transaksi ADD COLUMN jatuh_tempo DATETIME",
+                "ALTER TABLE transaksi ADD COLUMN status_verifikasi TEXT DEFAULT 'AUTO'",
             ]
             
             # Eksekusi satu-satu
@@ -261,12 +262,9 @@ class DBManager:
         conn.close()
         return res
 
-    def pinjam_buku(self, rfid_id, barcode_id):
-        """Mencatat transaksi pinjam dengan limit otomatis & kondisi awal (Hybrid)"""
+    def pinjam_buku(self, rfid_id, barcode_id, kondisi="Baik", catatan=""):
         conn = None
-        
-        # --- ATUR BATAS MAKSIMAL PINJAM DI SINI ---
-        MAX_PINJAM = 3 
+        MAX_PINJAM = 3 # Batas maksimal buku yang bisa dipinjam sekaligus
         
         try:
             conn = sqlite3.connect(self.db_path)
@@ -296,34 +294,41 @@ class DBManager:
             buku = cursor.fetchone()
             
             if buku and int(buku[0]) > 0:
-                # Ambil durasi pinjam (buku langka 3 hari, reguler 7 hari)
-                durasi = int(buku[1]) if buku[1] is not None else 7
-                
-                # Kurangi stok buku
+
+                # 🔥 CEK KONDISI BUKU DULU
+                if kondisi == "Rusak":
+                    cursor.execute("""
+                        INSERT INTO transaksi 
+                        (rfid_id, barcode_id, status_denda, tgl_pinjam, kondisi_awal, catatan_kerusakan, status_verifikasi)
+                        VALUES (?, ?, 'LUNAS', datetime('now','localtime'), ?, ?, 'PENDING')
+                    """, (rfid_id, barcode_id, kondisi, catatan))
+                    
+                    conn.commit()
+                    conn.close()
+                    return "PENDING"
+
+                # 🟢 KONDISI NORMAL (BAIK)
                 cursor.execute("UPDATE buku SET stok = stok - 1 WHERE barcode_id=?", (barcode_id,))
                 
-                # 4. CATAT TRANSAKSI DENGAN JATUH TEMPO & KONDISI AWAL
-                try:
-                    # Tambahan Baru: Memasukkan nilai 'Baik' ke kondisi_awal
-                    query_insert = f"""
-                        INSERT INTO transaksi (rfid_id, barcode_id, status_denda, tgl_pinjam, jatuh_tempo, kondisi_awal) 
-                        VALUES (?, ?, 'LUNAS', datetime('now', 'localtime'), datetime('now', 'localtime', '+{durasi} days'), 'Baik')
-                    """
-                    cursor.execute(query_insert, (rfid_id, barcode_id))
-                except sqlite3.OperationalError as e:
-                    # Fallback jika kolom baru belum ter-patch
-                    print(f"Warning DB: {e}. Menggunakan fallback insert.")
-                    cursor.execute("INSERT INTO transaksi (rfid_id, barcode_id, status_denda) VALUES (?, ?, 'LUNAS')", (rfid_id, barcode_id))
-                
+                durasi = int(buku[1]) if buku[1] is not None else 7
+
+                cursor.execute(f"""
+                INSERT INTO transaksi 
+                (rfid_id, barcode_id, status_denda, tgl_pinjam, jatuh_tempo, kondisi_awal, status_verifikasi) 
+                VALUES (?, ?, 'LUNAS', datetime('now', 'localtime'), datetime('now', 'localtime', '+{durasi} days'), ?, 'AUTO')
+            """, (rfid_id, barcode_id, kondisi))
+
+
                 conn.commit() 
                 conn.close()
                 return "SUKSES"
-                
-            conn.close()
-            return "HABIS" 
             
+            else:
+                conn.close()
+                return "HABIS"
+        
         except Exception as e:
-            print(f"🚨 Error Database Peminjaman: {e}")
+            print(f"Error pinjam buku: {e}")
             if conn:
                 conn.close()
             return "ERROR"
@@ -447,18 +452,18 @@ class DBManager:
         
         
     def get_user_terblokir(self):
-        """Mengambil daftar anggota yang diblokir beserta total dendanya (walau denda 0)"""
+        """Mengambil daftar anggota yang diblokir ATAU memiliki denda belum lunas"""
         conn = None 
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Perbaikan: Menggunakan LEFT JOIN dan COALESCE
+            # Perbaikan Query: Menambahkan kondisi OR t.status_denda = 'BELUM LUNAS'
             cursor.execute("""
-                SELECT a.rfid_id, a.nama, COALESCE(SUM(t.denda), 0) 
+                SELECT a.rfid_id, a.nama, COALESCE(SUM(t.denda), 0) as total_denda
                 FROM anggota a 
                 LEFT JOIN transaksi t ON a.rfid_id = t.rfid_id AND t.status_denda = 'BELUM LUNAS'
-                WHERE a.status = 'DIBLOKIR'
+                WHERE a.status = 'DIBLOKIR' OR t.status_denda = 'BELUM LUNAS'
                 GROUP BY a.rfid_id
             """)
             rows = cursor.fetchall()
@@ -545,19 +550,145 @@ class DBManager:
         return (total_stok, total_judul, total_anggota, buku_dipinjam, anggota_terblokir, antrean_aktivasi)  
   
     #fitur deteksi wajah login berdasarkan ID Angka (ROWID) yang otomatis di-generate SQLite saat insert anggota baru
-    def get_anggota_by_id(self, id_user):
-        """Mengambil data anggota berdasarkan ID Angka dari deteksi wajah"""
+    def get_anggota_by_rfid(self, rfid_id):
+        """Mengecek data asli di database berdasarkan RFID"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT rfid_id, nama, prodi, role FROM anggota WHERE rfid_id = ?", (rfid_id,))
+            data = cursor.fetchone()
+            conn.close()
+            return data
+        except Exception as e:
+            print(f"Error: {e}")
+            return None
+        
+    def get_transaksi_pending(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            # JOIN agar dapat Nama dan Judul
+            cursor.execute("""
+                SELECT t.id_transaksi, a.nama, b.judul 
+                FROM transaksi t
+                JOIN anggota a ON t.rfid_id = a.rfid_id
+                JOIN buku b ON t.barcode_id = b.barcode_id
+                WHERE t.status_verifikasi='PENDING'
+            """)
+            data = cursor.fetchall()
+            conn.close()
+            return data
+        except Exception as e:
+            print(f"Error Get Pending: {e}")
+            return []
+
+    def verifikasi_buku(self, id_transaksi, status_baru, catatan=""):
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Catatan: Sesuaikan 'id_user' dengan nama kolom Primary Key di tabel anggota kamu.
-            # Jika tidak ada kolom khusus, SQLite punya kolom bawaan bernama ROWID.
-            cursor.execute("SELECT rfid_id, nama, prodi, role FROM anggota WHERE ROWID = ?", (id_user,))
-            data = cursor.fetchone()
-            
+            if status_baru == 'APPROVED':
+                cursor.execute("""
+                    UPDATE transaksi SET status_verifikasi = 'APPROVED', catatan_kerusakan = ? 
+                    WHERE id_transaksi = ?
+                """, (catatan, id_transaksi))
+            elif status_baru == 'REJECTED':
+                # Kembalikan stok jika ditolak
+                cursor.execute("SELECT barcode_id FROM transaksi WHERE id_transaksi = ?", (id_transaksi,))
+                barcode_id = cursor.fetchone()[0]
+                cursor.execute("UPDATE buku SET stok = stok + 1 WHERE barcode_id = ?", (barcode_id,))
+                cursor.execute("UPDATE transaksi SET status_verifikasi = 'REJECTED' WHERE id_transaksi = ?", (id_transaksi,))
+                
+            conn.commit()
             conn.close()
-            return data # Mengembalikan tuple (rfid_id, nama, prodi, role)
+            return True
+        except Exception as e:
+            print(f"Error Verifikasi: {e}")
+            return False
+        
+    def get_pinjaman_aktif_by_rfid(self, rfid_id):
+        """Mengambil maksimal 3 buku yang sedang dipinjam (FIX: Handle NULL & Empty String)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Perhatikan penambahan (t.tgl_kembali IS NULL OR t.tgl_kembali = '')
+            cursor.execute("""
+                SELECT t.id_transaksi, b.judul, t.tgl_pinjam, t.jatuh_tempo, t.kondisi_awal, t.catatan_kerusakan
+                FROM transaksi t
+                JOIN buku b ON t.barcode_id = b.barcode_id
+                WHERE t.rfid_id = ? AND (t.tgl_kembali IS NULL OR t.tgl_kembali = '')
+            """, (str(rfid_id).strip(),))
+            
+            data = cursor.fetchall()
+            conn.close()
+            return data
+        except Exception as e:
+            print(f"Error Get Pinjaman Aktif: {e}")
+            return []
+
+    def proses_kembali_admin(self, id_transaksi, kondisi_akhir, denda_tambahan=0):
+        from datetime import datetime # Pastikan ini ada di atas dbManager.py
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 1. Ambil data untuk cek keterlambatan
+            cursor.execute("SELECT barcode_id, jatuh_tempo FROM transaksi WHERE id_transaksi = ?", (id_transaksi,))
+            row = cursor.fetchone()
+            if not row: return False, 0
+            barcode_id, jatuh_tempo_str = row
+            
+            # 2. Hitung Denda Telat
+            denda_telat = 0
+            if jatuh_tempo_str:
+                jatuh_tempo = datetime.strptime(jatuh_tempo_str, "%Y-%m-%d %H:%M:%S")
+                sekarang = datetime.now()
+                if sekarang > jatuh_tempo:
+                    denda_telat = (sekarang - jatuh_tempo).days * 1000 # Rp 1000/hari
+            
+            # 3. Total Denda & Status
+            denda_rusak = int(denda_tambahan)
+            total_denda = denda_telat + denda_rusak
+            status_denda = 'BELUM LUNAS' if total_denda > 0 else 'LUNAS'
+            tgl_kembali = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 4. UPDATE Tabel Transaksi
+            cursor.execute("""
+                UPDATE transaksi 
+                SET tgl_kembali = ?, 
+                    kondisi_akhir = ?, 
+                    denda_telat = ?, 
+                    denda_rusak = ?, 
+                    denda = ?, 
+                    status_denda = ?,
+                    status_verifikasi = 'VERIFIED'
+                WHERE id_transaksi = ?
+            """, (tgl_kembali, kondisi_akhir, denda_telat, denda_rusak, total_denda, status_denda, id_transaksi))
+            
+            # 5. UPDATE STOK BUKU (Logika Penting!)
+            # Jika kondisi BUKAN 'Hilang', stok kembali ke rak (+1)
+            if kondisi_akhir != "Hilang":
+                cursor.execute("UPDATE buku SET stok = stok + 1 WHERE barcode_id = ?", (barcode_id,))
+            
+            conn.commit()
+            conn.close()
+            return True, total_denda
+        except Exception as e:
+            print(f"Error Proses Pengembalian: {e}")
+            return False, 0
+        
+    def get_anggota_by_id(self, user_id):
+        """Dipanggil oleh Face Recognition untuk mengambil data berdasarkan ID (angka)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            # Face Recognition menggunakan ID berupa angka (1, 2, 3...). 
+            # Di SQLite, angka urutan ini otomatis tersimpan di kolom ROWID
+            cursor.execute("SELECT rfid_id, nama, prodi, role FROM anggota WHERE ROWID = ?", (user_id,))
+            data = cursor.fetchone()
+            conn.close()
+            return data
         except Exception as e:
             print(f"Error Get Anggota by ID: {e}")
             return None

@@ -60,22 +60,34 @@ class PageLogin(ctk.CTkFrame):
         self.entry_rfid.focus_set()
         self.status_label.configure(text="Silakan Tempelkan Kartu Anda di Scanner", text_color="white")
 
-    def proses_rfid(self, event):
-        rfid_input = self.entry_rfid.get().strip()
-        user = self.controller.db.get_member(rfid_input)
-        
-        if user:
-            self.controller.current_user = user
-            role = str(user[-1]).strip().upper() 
-            self.entry_rfid.delete(0, 'end') # Bersihkan sebelum pindah
+    def proses_rfid(self, event=None):
+        rfid_data = self.entry_rfid.get().strip()
+        if not rfid_data:
+            return
+
+        # Ambil data dari DB berdasarkan RFID
+        user_data = self.controller.db.get_anggota_by_rfid(rfid_data)
+
+        if user_data:
+            # 1. Simpan data user yang sedang login
+            self.controller.current_user = user_data
+            self.entry_rfid.delete(0, 'end')
             
+            # 2. Ambil ROLE dari database (Indeks ke-3)
+            role = user_data[3] 
+            
+            # 3. PERCABANGAN LOGIKA LOGIN
             if role == "ADMIN":
-                self.controller.show_frame("PageMenu")
+                # Jika Admin, langsung tembak ke Dashboard Admin
+                # (Pastikan "PageAdmin" ini sesuai dengan nama class halaman admin kamu)
+                self.controller.show_frame("PageMenu") 
             else:
+                # Jika USER biasa, wajib masuk ke 2FA (Scan Wajah)
                 self.controller.show_frame("PageFaceAuth")
         else:
-            self.status_label.configure(text="KARTU TIDAK TERDAFTAR! Silakan Aktivasi Akun.", text_color="red")
-            self.entry_rfid.delete(0, 'end') 
+            import tkinter.messagebox as messagebox
+            messagebox.showerror("Error", "Kartu RFID tidak dikenali atau belum aktif!")
+            self.entry_rfid.delete(0, 'end')
 
     def go_back(self):
         self.entry_rfid.delete(0, 'end')
@@ -230,7 +242,6 @@ class PageFaceAuth(ctk.CTkFrame):
         if self.cap is None or not self.cap.isOpened():
             return
 
-        # Jika sudah login, stop looping kamera, biarkan gambar terakhir membeku
         if self.login_berhasil:
             return
 
@@ -245,33 +256,35 @@ class PageFaceAuth(ctk.CTkFrame):
                 id_hasil, confidence = self.recognizer.predict(gray[y:y+h, x:x+w])
                 
                 if confidence < 65: 
-                    user_data = self.controller.db.get_anggota_by_id(id_hasil)
+                    # 1. Ambil data wajah dari database
+                    user_wajah = self.controller.db.get_anggota_by_id(id_hasil)
                     
-                    if user_data:
-                        nama_user = user_data[1]
-                        
-                        # Tulis teks yang keren
-                        cv2.putText(frame, f"Akses Diberikan:", (x, y-35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                        cv2.putText(frame, f"{nama_user}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-                        
-                        # 1. Kunci sistem agar tidak scan wajah ini berkali-kali
-                        self.login_berhasil = True 
-                        
-                        # 2. Update UI dengan frame yang ada tulisan "Akses Diberikan"-nya
-                        self.tampilkan_ke_layar(frame)
-                        
-                        # 3. Beri jeda 2 detik (2000 ms), BARU jalankan sukses_login
-                        self.after(2000, lambda: self.sukses_login(user_data))
-                        return 
+                    # 2. Ambil data kartu RFID yang di-scan di halaman sebelumnya
+                    # (Asumsinya kamu menyimpan data user dari RFID ke self.controller.current_user saat scan kartu)
+                    user_kartu = self.controller.current_user 
+                    
+                    if user_wajah and user_kartu:
+                        # 3. VERIFIKASI 2FA: Apakah RFID_ID Wajah == RFID_ID Kartu?
+                        if user_wajah[0] == user_kartu[0]:
+                            nama_user = user_wajah[1]
+                            cv2.putText(frame, "VERIFIKASI BERHASIL:", (x, y-35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                            cv2.putText(frame, f"{nama_user}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                            
+                            self.login_berhasil = True 
+                            self.tampilkan_ke_layar(frame)
+                            self.after(2000, lambda: self.sukses_login(user_wajah))
+                            return 
+                        else:
+                            # JIKA KARTU DAN WAJAH BEDA ORANG!
+                            cv2.putText(frame, "AKSES DITOLAK!", (x, y-35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            cv2.putText(frame, "Wajah & Kartu Tidak Cocok", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 else:
-                    cv2.putText(frame, "Tidak Dikenali", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    cv2.putText(frame, "Wajah Tidak Dikenali", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-            # Update UI jika belum berhasil login
             self.tampilkan_ke_layar(frame)
 
-        # Ulangi fungsi setiap 10ms jika belum berhasil login
         if not self.login_berhasil:
-            self.after(10, self.scan_wajah)
+            self.after(50, self.scan_wajah) # Pakai 50ms biar tidak lag
 
     def sukses_login(self, user_data):
         if self.cap:
@@ -297,33 +310,43 @@ class PageMenu(ctk.CTkFrame):
         self.welcome_label = ctk.CTkLabel(self, text="Memuat...", font=("Arial", 26, "bold"))
         self.welcome_label.pack(pady=(30, 10))
 
-        # --- Frame Stats (Sekarang Konfigurasi 5 Kolom) ---
+        # --- Frame Stats (6 Kartu) ---
         self.frame_stats = ctk.CTkFrame(self, fg_color="transparent")
-        self.frame_stats.grid_columnconfigure((0, 1, 2, 3, 4, 5), weight=1) # Tambah kolom ke-5
+        self.frame_stats.grid_columnconfigure((0, 1, 2, 3, 4, 5), weight=1)
 
-        # Buat 6 Kartu
         self.lbl_tot_stok = self.buat_kartu(self.frame_stats, "Total Stok", "0", "#3498db", 0)
-        self.lbl_tot_judul = self.buat_kartu(self.frame_stats, "Total Judul", "0", "#9b59b6", 1) # Baru! Ungu
+        self.lbl_tot_judul = self.buat_kartu(self.frame_stats, "Total Judul", "0", "#9b59b6", 1) 
         self.lbl_tot_anggota = self.buat_kartu(self.frame_stats, "Anggota", "0", "#2ecc71", 2)
         self.lbl_dipinjam = self.buat_kartu(self.frame_stats, "Dipinjam", "0", "#f39c12", 3)
         self.lbl_terblokir = self.buat_kartu(self.frame_stats, "Terblokir", "0", "#e74c3c", 4)
         self.lbl_antrean = self.buat_kartu(self.frame_stats, "Antrean Aktivasi", "0", "#16a085", 5)
 
-        # ... (Sisa kode frame_nav dan tombol-tombol tetap sama seperti sebelumnya) ...
+        # --- Frame Navigasi (Wadah Utama Tombol) ---
         self.frame_nav = ctk.CTkFrame(self, fg_color="transparent")
         self.frame_nav.pack(pady=10)
+
+        # ==========================================
+        # DEFINISI SEMUA TOMBOL (Dibuat sekali saja)
+        # ==========================================
+        # 1. TOMBOL KHUSUS ADMIN
         self.btn_admin_buku = ctk.CTkButton(self.frame_nav, text="📚 Kelola Buku", width=160, height=40, command=lambda: self.controller.show_frame("PageAdminBuku"))
         self.btn_admin_anggota = ctk.CTkButton(self.frame_nav, text="👥 Aktivasi Anggota", width=160, height=40, command=lambda: self.controller.show_frame("PageAdminDaftar"))
         self.btn_admin_laporan = ctk.CTkButton(self.frame_nav, text="📊 Laporan", width=160, height=40, command=lambda: self.controller.show_frame("PageAdminLaporan"))
         self.btn_admin_denda = ctk.CTkButton(self.frame_nav, text="💸 Kelola Denda", width=160, height=40, command=lambda: self.controller.show_frame("PageAdminDenda"))
+        self.btn_verifikasi = ctk.CTkButton(self.frame_nav, text="✅ Verifikasi Buku", width=160, height=40, command=lambda: self.controller.show_frame("PageVerifikasi"))
+        self.btn_admin_kembali = ctk.CTkButton(self.frame_nav, text="🔄 Pengembalian & Inspeksi", width=200, height=40, fg_color="#8e44ad", hover_color="#9b59b6", command=lambda: self.controller.show_frame("PagePengembalianAdmin"))
+
+        # 2. TOMBOL KHUSUS USER/SISWA
         self.btn_pinjam = ctk.CTkButton(self.frame_nav, text="📥 Pinjam Buku", width=180, height=40, command=lambda: self.controller.show_frame("PagePeminjaman"))
-        self.btn_kembali = ctk.CTkButton(self.frame_nav, text="📤 Kembalikan Buku", width=180, height=40, command=lambda: self.controller.show_frame("PagePengembalian"))
+        self.btn_tutorial = ctk.CTkButton(self.frame_nav, text="❓ Cara Pengembalian", width=180, height=40, fg_color="#f39c12", hover_color="#e67e22", command=self.tutorial_pengembalian)
         self.btn_riwayat_user = ctk.CTkButton(self.frame_nav, text="📖 Riwayat Saya", width=180, height=40, command=lambda: self.controller.show_frame("PageRiwayatUser"))
+        
+        # 3. TOMBOL UMUM (Keluar)
         self.btn_logout = ctk.CTkButton(self.frame_nav, text="Keluar (Log Out)", fg_color="#E82626", hover_color="#A90000", width=140, command=self.logout)
 
     def buat_kartu(self, parent, judul, nilai, warna, kolom):
         card = ctk.CTkFrame(parent, fg_color="gray20", border_width=2, border_color=warna, corner_radius=10)
-        card.grid(row=0, column=kolom, padx=5, pady=10, sticky="nsew") # Jarak padx dikurangi sedikit agar muat 5
+        card.grid(row=0, column=kolom, padx=5, pady=10, sticky="nsew")
         ctk.CTkLabel(card, text=judul, font=("Arial", 13, "bold"), text_color="gray70").pack(pady=(15, 0))
         lbl_nilai = ctk.CTkLabel(card, text=nilai, font=("Arial", 28, "bold"), text_color=warna)
         lbl_nilai.pack(pady=(5, 15))
@@ -334,20 +357,16 @@ class PageMenu(ctk.CTkFrame):
             user_name = self.controller.current_user[1]
             role = str(self.controller.current_user[-1]).strip().upper()
 
-            # Sembunyikan semua navigasi dulu
-            self.btn_admin_buku.grid_forget()
-            self.btn_admin_anggota.grid_forget()
-            self.btn_admin_laporan.grid_forget()
-            self.btn_admin_denda.grid_forget()
-            self.btn_pinjam.grid_forget()
-            self.btn_kembali.grid_forget()
-            self.btn_riwayat_user.grid_forget()
+            # 1. SEMBUNYIKAN SEMUA TOMBOL DULU (Agar tidak ada yang nyangkut)
+            for widget in self.frame_nav.winfo_children():
+                widget.grid_forget()
 
+            # 2. MUNCULKAN TOMBOL SESUAI ROLE
             if role == "ADMIN":
                 self.welcome_label.configure(text=f"Panel Admin: {user_name}")
                 self.frame_stats.pack(after=self.welcome_label, pady=20, padx=10, fill="x")
 
-                # Ambil data dari database (5 nilai)
+                # Load data statistik
                 stats = self.controller.db.get_dashboard_stats()
                 if stats:
                     stok, judul, anggota, pinjam, blokir, antrean_aktivasi = stats
@@ -358,18 +377,47 @@ class PageMenu(ctk.CTkFrame):
                     self.lbl_terblokir.configure(text=str(blokir))
                     self.lbl_antrean.configure(text=str(antrean_aktivasi))
 
+                # TATA LETAK TOMBOL ADMIN (Dibuat 2 Baris agar rapi)
                 self.btn_admin_buku.grid(row=0, column=0, padx=5, pady=10)
                 self.btn_admin_anggota.grid(row=0, column=1, padx=5, pady=10)
                 self.btn_admin_laporan.grid(row=0, column=2, padx=5, pady=10) 
                 self.btn_admin_denda.grid(row=0, column=3, padx=5, pady=10)
-                self.btn_logout.grid(row=1, column=0, columnspan=4, padx=10, pady=30) 
-            else:
+                
+                # Baris kedua untuk fitur baru
+                self.btn_verifikasi.grid(row=1, column=0, columnspan=2, padx=5, pady=10)
+                self.btn_admin_kembali.grid(row=1, column=2, columnspan=2, padx=5, pady=10)
+                
+                self.btn_logout.grid(row=2, column=0, columnspan=4, padx=10, pady=30) 
+
+            else: # JIKA USER / SISWA
                 self.welcome_label.configure(text=f"Selamat Datang, {user_name}!")
-                self.frame_stats.pack_forget()
+                self.frame_stats.pack_forget() # Sembunyikan statistik dari user
+                
+                # TATA LETAK TOMBOL USER
                 self.btn_pinjam.grid(row=0, column=0, padx=10, pady=10)
-                self.btn_kembali.grid(row=0, column=1, padx=10, pady=10)
+                self.btn_tutorial.grid(row=0, column=1, padx=10, pady=10)
                 self.btn_riwayat_user.grid(row=0, column=2, padx=10, pady=10)
+                
                 self.btn_logout.grid(row=1, column=0, columnspan=3, padx=10, pady=30)
+                
+    def tutorial_pengembalian(self):
+        popup = ctk.CTkToplevel(self)
+        popup.title("Informasi Pengembalian")
+        # Diperlebar jadi 450x250 agar lega
+        popup.geometry("450x250") 
+        popup.attributes('-topmost', 'true')
+        
+        pesan = ("SISTEM PENGEMBALIAN:\n\n"
+                 "1. Bawa buku yang ingin dikembalikan ke Meja Admin.\n"
+                 "2. Bawa juga Kartu Siswa (RFID) Anda.\n"
+                 "3. Admin akan mengecek fisik buku dan memproses pengembalian.\n"
+                 "4. Harap bayar denda di tempat jika ada keterlambatan/kerusakan.")
+        
+        # Tambahkan wraplength=400 agar teks otomatis turun ke bawah jika kepanjangan
+        lbl = ctk.CTkLabel(popup, text=pesan, font=("Arial", 14), justify="left", wraplength=400)
+        lbl.pack(padx=20, pady=20, fill="x")
+        
+        ctk.CTkButton(popup, text="Saya Mengerti", command=popup.destroy).pack(pady=10)
 
     def logout(self):
         self.controller.current_user = None
@@ -739,6 +787,14 @@ class PagePeminjaman(ctk.CTkFrame):
         
         self.ent_barcode = ctk.CTkEntry(search_frame, placeholder_text="Scan/Ketik Barcode Buku", width=250)
         self.ent_barcode.grid(row=0, column=0, padx=10, pady=10)
+        self.var_kondisi = ctk.StringVar(value="Baik")
+
+        self.dropdown_kondisi = ctk.CTkOptionMenu(
+            self,
+            values=["Baik", "Rusak"],
+            variable=self.var_kondisi
+        )
+        self.dropdown_kondisi.pack(pady=5)
         
         btn_cari = ctk.CTkButton(search_frame, text="Cari Buku", command=self.cari_buku)
         btn_cari.grid(row=0, column=1, padx=10, pady=10)
@@ -785,10 +841,26 @@ class PagePeminjaman(ctk.CTkFrame):
         barcode = self.buku_aktif[0] 
         
         # Panggil fungsi yang baru diupdate
-        hasil = self.controller.db.pinjam_buku(rfid_user, barcode)
+        kondisi = self.var_kondisi.get()
+
+        hasil = self.controller.db.pinjam_buku(
+            rfid_user,
+            barcode,
+            kondisi,
+            ""
+        )
         
         if hasil == "SUKSES":
             self.lbl_info.configure(text=f"BERHASIL MEMINJAM:\n{self.buku_aktif[1]}", text_color="green")
+            self.btn_pinjam.pack_forget()
+            self.ent_barcode.delete(0, 'end')
+            self.buku_aktif = None
+            
+        elif hasil == "PENDING":
+            self.lbl_info.configure(
+                text="Buku dalam kondisi rusak.\nMenunggu verifikasi admin.",
+                text_color="orange"
+            )
             self.btn_pinjam.pack_forget()
             self.ent_barcode.delete(0, 'end')
             self.buku_aktif = None
@@ -818,98 +890,134 @@ class PagePeminjaman(ctk.CTkFrame):
         self.controller.show_frame("PageMenu")
         
     # --- 7. PAGE: PENGEMBALIAN BUKU ---
-class PagePengembalian(ctk.CTkFrame):
+class PagePengembalianAdmin(ctk.CTkFrame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        self.transaksi_aktif = None # Menyimpan data transaksi yang sedang dicek
-        self.buku_aktif = None
         
-        ctk.CTkLabel(self, text="SISTEM PENGEMBALIAN BUKU", font=("Arial", 24, "bold")).pack(pady=20)
+        ctk.CTkLabel(self, text="SISTEM PENGEMBALIAN & INSPEKSI BUKU", font=("Arial", 24, "bold")).pack(pady=(20, 10))
         
-        # Frame Pencarian
-        search_frame = ctk.CTkFrame(self)
+        search_frame = ctk.CTkFrame(self, fg_color="transparent")
         search_frame.pack(pady=10)
         
-        self.ent_barcode = ctk.CTkEntry(search_frame, placeholder_text="Scan/Ketik Barcode Buku", width=250)
-        self.ent_barcode.grid(row=0, column=0, padx=10, pady=10)
+        self.ent_rfid = ctk.CTkEntry(search_frame, placeholder_text="Scan RFID Siswa...", width=250)
+        self.ent_rfid.pack(side="left", padx=10)
+        ctk.CTkButton(search_frame, text="Cari Pinjaman", command=self.cari_data).pack(side="left")
         
-        btn_cari = ctk.CTkButton(search_frame, text="Cek Buku", command=self.cek_buku)
-        btn_cari.grid(row=0, column=1, padx=10, pady=10)
+        self.container_buku = ctk.CTkScrollableFrame(self)
+        self.container_buku.pack(fill="both", expand=True, padx=20, pady=10)
         
-        # Label Info
-        self.lbl_info = ctk.CTkLabel(self, text="Silahkan scan barcode buku yang ingin dikembalikan.", font=("Arial", 16))
-        self.lbl_info.pack(pady=20)
-        
-        # Tombol Aksi
-        self.btn_kembali = ctk.CTkButton(self, text="Konfirmasi Pengembalian", fg_color="green", font=("Arial", 16, "bold"),
-                                        command=self.proses_kembali)
-        self.btn_kembali.pack_forget() 
-        
-        ctk.CTkButton(self, text="Kembali ke Menu", fg_color="red", 
-                      command=self.go_back).pack(pady=20)
+        # Di dalam __init__ PagePengembalianAdmin
+        ctk.CTkButton(self, text="Kembali ke Menu", fg_color="#e74c3c", hover_color="#c0392b",
+                    command=lambda: self.controller.show_frame("PageMenu")).pack(pady=20)
+# Perhatikan di atas: tujuannya adalah "PageMenu"
 
-    def cek_buku(self):
-        if not self.controller.current_user:
-            return
-        
-        barcode = self.ent_barcode.get().strip()
-        rfid_user = self.controller.current_user[0]
-        
-        # Cek apakah buku ini beneran dipinjam oleh user tersebut
-        transaksi = self.controller.db.get_transaksi_aktif(rfid_user, barcode)
-        
-        if transaksi:
-            buku = self.controller.db.get_buku_by_barcode(barcode)
-            self.transaksi_aktif = transaksi
-            self.buku_aktif = buku
+    def cari_data(self):
+        for widget in self.container_buku.winfo_children(): widget.destroy()
+        rfid = self.ent_rfid.get().strip()
+        if not rfid: return
             
-            info_text = f"Buku Ditemukan!\nJudul: {buku[1]}\nTanggal Pinjam: {transaksi[1]}"
-            self.lbl_info.configure(text=info_text, text_color="white")
-            self.btn_kembali.pack(pady=10)
-        else:
-            self.transaksi_aktif = None
-            self.buku_aktif = None
-            self.lbl_info.configure(text="TIDAK ADA DATA PEMINJAMAN AKTIF UNTUK BUKU INI!", text_color="red")
-            self.btn_kembali.pack_forget()
+        data = self.controller.db.get_pinjaman_aktif_by_rfid(rfid)
+        if not data:
+            ctk.CTkLabel(self.container_buku, text="Tidak ada buku yang sedang dipinjam.", font=("Arial", 14, "italic")).pack(pady=40)
+            return
 
-    def proses_kembali(self):
-        if not self.controller.current_user or not self.transaksi_aktif:
-            return
+        for id_trans, judul, tgl_pinjam, j_tempo, k_awal, cat in data:
+            card = ctk.CTkFrame(self.container_buku, fg_color="gray15")
+            card.pack(fill="x", padx=10, pady=5)
             
-        rfid_user = self.controller.current_user[0]
-        barcode = self.buku_aktif[0]
-        id_transaksi = self.transaksi_aktif[0]
-        tgl_pinjam_str = self.transaksi_aktif[1] # Ambil tanggal pinjam dari data transaksi aktif
-        
-        # Jalankan fungsi dan ambil 3 outputnya (status_sukses, jumlah_denda, selisih_hari)
-        sukses, denda, lama_pinjam = self.controller.db.kembalikan_buku(rfid_user, barcode, id_transaksi, tgl_pinjam_str)
-        
-        if sukses:
-            # Teks default jika tidak ada denda
-            pesan_sukses = f"BERHASIL MENGEMBALIKAN:\n{self.buku_aktif[1]}\nLama Pinjam: {lama_pinjam} hari"
-            warna_teks = "green"
+            info_frame = ctk.CTkFrame(card, fg_color="transparent")
+            info_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
             
-            # Jika ternyata ada denda, ubah pesan dan warnanya!
-            if denda > 0:
-                pesan_sukses += f"\n\nTERLAMBAT MENGEMBALIKAN!\nTotal Denda Anda: Rp {denda:,}"
-                warna_teks = "orange" # Warna peringatan
+            ctk.CTkLabel(info_frame, text=judul, font=("Arial", 16, "bold"), anchor="w").pack(fill="x")
+            ctk.CTkLabel(info_frame, text=f"Jatuh Tempo: {j_tempo}", font=("Arial", 12), text_color="yellow", anchor="w").pack(fill="x")
+            ctk.CTkLabel(info_frame, text=f"Kondisi Awal: {k_awal} ({cat if cat else '-'})", font=("Arial", 12), anchor="w").pack(fill="x")
+            
+            ctk.CTkButton(card, text="🔍 Inspeksi", command=lambda i=id_trans, c=card: self.tampilkan_form(i, c)).pack(side="right", padx=10)
+
+    def tampilkan_form(self, id_trans, parent_card):
+        # 1. Hapus tombol "🔍 Inspeksi" agar tergantikan dengan form
+        for w in parent_card.winfo_children():
+            if isinstance(w, ctk.CTkButton): 
+                w.destroy()
+            
+        # 2. Buat frame untuk menampung elemen form
+        form_frame = ctk.CTkFrame(parent_card, fg_color="gray20")
+        form_frame.pack(side="right", padx=10, pady=10)
+        
+        # --- BLOK 1: KONDISI BUKU ---
+        # Frame kecil khusus untuk Kondisi agar Label dan Dropdown menyatu
+        frame_kondisi = ctk.CTkFrame(form_frame, fg_color="transparent")
+        frame_kondisi.pack(side="left", padx=5)
+        
+        ctk.CTkLabel(frame_kondisi, text="Kondisi Akhir:", font=("Arial", 11, "bold"), text_color="gray").pack(anchor="w")
+        
+        var_k = ctk.StringVar(value="Sesuai Awal")
+        combo_kondisi = ctk.CTkOptionMenu(
+            frame_kondisi, 
+            values=["Sesuai Awal", "Kerusakan Baru", "Hilang"], 
+            variable=var_k, 
+            width=130
+        )
+        combo_kondisi.pack()
+        
+        # --- BLOK 2: DENDA RUSAK ---
+        # Frame kecil khusus untuk Denda agar Label dan Input menyatu
+        frame_denda = ctk.CTkFrame(form_frame, fg_color="transparent")
+        frame_denda.pack(side="left", padx=5)
+        
+        ctk.CTkLabel(frame_denda, text="Denda Fisik (Rp):", font=("Arial", 11, "bold"), text_color="gray").pack(anchor="w")
+        
+        ent_denda = ctk.CTkEntry(frame_denda, placeholder_text="Misal: 10000", width=110)
+        ent_denda.pack()
+        ent_denda.insert(0, "0")
+        
+        # --- LOGIKA OTOMATISASI UI ---
+        # Fungsi ini akan dipanggil otomatis setiap kali admin ganti pilihan di dropdown
+        def on_kondisi_change(choice):
+            if choice == "Sesuai Awal":
+                ent_denda.delete(0, 'end')
+                ent_denda.insert(0, "0")
+                ent_denda.configure(state="disabled") # Kunci inputan biar nggak diisi denda
+            elif choice == "Kerusakan Baru":
+                ent_denda.configure(state="normal")   # Buka kunci inputan
+                ent_denda.delete(0, 'end')
+                ent_denda.insert(0, "0")
+            elif choice == "Hilang":
+                ent_denda.configure(state="normal")
+                ent_denda.delete(0, 'end')
+                # Nanti bisa di-upgrade: ambil harga asli buku dari database
+                ent_denda.insert(0, "50000") 
                 
-            self.lbl_info.configure(text=pesan_sukses, text_color=warna_teks)
-            self.btn_kembali.pack_forget()
-            self.ent_barcode.delete(0, 'end')
-            self.transaksi_aktif = None
-            self.buku_aktif = None
-        else:
-            self.lbl_info.configure(text="GAGAL MENGEMBALIKAN BUKU!", text_color="red")
+        # Pasang pendeteksi perubahan ke dropdown
+        combo_kondisi.configure(command=on_kondisi_change)
+        
+        # Eksekusi sekali di awal agar saat pertama muncul, jika "Sesuai Awal" maka input terkunci
+        on_kondisi_change("Sesuai Awal")
+        
+        # --- BLOK 3: TOMBOL KONFIRMASI ---
+        # Tombol konfirmasi diletakkan paling kanan dengan padding atas sedikit agar sejajar
+        ctk.CTkButton(
+            form_frame, 
+            text="✅ Konfirmasi", 
+            fg_color="green", 
+            hover_color="#1e8449",
+            width=100,
+            command=lambda: self.proses(id_trans, var_k.get(), ent_denda.get())
+        ).pack(side="left", padx=10, pady=(15, 0)) # pady(15,0) untuk mendorong tombol sejajar dgn input
 
-    def go_back(self):
-        self.ent_barcode.delete(0, 'end')
-        self.lbl_info.configure(text="Silahkan scan barcode buku yang ingin dikembalikan.", text_color="white")
-        self.btn_kembali.pack_forget()
-        self.transaksi_aktif = None
-        self.buku_aktif = None
-        self.controller.show_frame("PageMenu")
+    def proses(self, id_trans, kondisi, denda_str):
+        denda = int(denda_str) if denda_str.isdigit() else 0
+        sukses, total = self.controller.db.proses_kembali_admin(id_trans, kondisi, denda)
+        if sukses:
+            msg = f"Berhasil dikembalikan!\nTotal Denda: Rp {total}" if total > 0 else "Berhasil dikembalikan tanpa denda!"
+            popup = ctk.CTkToplevel(self)
+            popup.title("Info")
+            popup.geometry("300x150")
+            popup.attributes('-topmost', 'true')
+            ctk.CTkLabel(popup, text=msg, font=("Arial", 14)).pack(expand=True)
+            ctk.CTkButton(popup, text="OK", command=popup.destroy).pack(pady=10)
+            self.cari_data()
         
 # --- 8. PAGE: RIWAYAT USER ---
 class PageRiwayatUser(ctk.CTkFrame):
@@ -1132,7 +1240,101 @@ class PageAdminDenda(ctk.CTkFrame):
         sukses = self.controller.db.lunasi_denda(rfid)
         if sukses:
             self.refresh_data()
+            
+class PageVerifikasi(ctk.CTkFrame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
 
+        # --- BAGIAN ATAS (TOMBOL KEMBALI & JUDUL) ---
+        top_frame = ctk.CTkFrame(self, fg_color="transparent")
+        top_frame.pack(fill="x", padx=20, pady=15)
+
+        ctk.CTkButton(top_frame, text="⬅ Kembali", width=80, fg_color="#e74c3c", hover_color="#c0392b",
+                      command=lambda: self.controller.show_frame("PageMenu")).pack(side="left")
+        
+        ctk.CTkLabel(top_frame, text="VERIFIKASI PEMINJAMAN BUKU RUSAK", font=("Arial", 20, "bold")).pack(side="left", padx=20)
+        
+        ctk.CTkButton(top_frame, text="🔄 Segarkan", width=100, fg_color="#3498db", hover_color="#2980b9",
+                      command=self.load_data).pack(side="right")
+
+        # --- CONTAINER TABEL (Header & Data masuk sini semua) ---
+        self.table_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.table_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+
+        # Kunci Ukuran Grid Kolom (Biar rapi abadi)
+        self.table_frame.grid_columnconfigure(0, weight=0, minsize=50)   # Kolom ID
+        self.table_frame.grid_columnconfigure(1, weight=1, minsize=150)  # Kolom Nama
+        self.table_frame.grid_columnconfigure(2, weight=1, minsize=200)  # Kolom Judul
+        self.table_frame.grid_columnconfigure(3, weight=0, minsize=160)  # Kolom Aksi
+
+    def on_show(self):
+        self.load_data()
+
+    def load_data(self):
+        # Bersihkan tabel lama (termasuk header, biar di-refresh ulang)
+        for widget in self.table_frame.winfo_children():
+            widget.destroy()
+
+        # 1. BIKIN HEADER TABEL DI BARIS KE-0
+        headers = ["ID", "Nama Siswa", "Judul Buku", "Aksi (Admin)"]
+        for col, text in enumerate(headers):
+            header_lbl = ctk.CTkLabel(self.table_frame, text=text, font=("Arial", 14, "bold"),
+                                      fg_color="gray25", corner_radius=0, pady=10, padx=10, 
+                                      anchor="w" if col != 3 else "center")
+            header_lbl.grid(row=0, column=col, sticky="ew", padx=1, pady=(0, 5))
+
+        # 2. AMBIL DATA DARI DATABASE
+        data_pending = self.controller.db.get_transaksi_pending()
+
+        if not data_pending:
+            ctk.CTkLabel(self.table_frame, text="Tidak ada antrean verifikasi saat ini.", 
+                         font=("Arial", 14, "italic")).grid(row=1, column=0, columnspan=4, pady=40)
+            return
+
+        # 3. MASUKKAN DATA KE BARIS SELANJUTNYA
+        for row_idx, (id_trans, nama, judul) in enumerate(data_pending):
+            current_row = row_idx + 1
+            bg_color = "gray15" if current_row % 2 == 0 else "gray18" # Warna belang-belang
+
+            # Sel ID
+            ctk.CTkLabel(self.table_frame, text=str(id_trans), fg_color=bg_color, corner_radius=0, 
+                         padx=10, anchor="w").grid(row=current_row, column=0, sticky="nsew", padx=1, pady=1)
+            # Sel Nama
+            ctk.CTkLabel(self.table_frame, text=nama, fg_color=bg_color, corner_radius=0, 
+                         padx=10, anchor="w").grid(row=current_row, column=1, sticky="nsew", padx=1, pady=1)
+            # Sel Judul
+            ctk.CTkLabel(self.table_frame, text=judul, fg_color=bg_color, corner_radius=0, 
+                         padx=10, anchor="w", wraplength=250).grid(row=current_row, column=2, sticky="nsew", padx=1, pady=1)
+
+            # Sel Aksi (Berisi 2 Tombol)
+            action_frame = ctk.CTkFrame(self.table_frame, fg_color=bg_color, corner_radius=0)
+            action_frame.grid(row=current_row, column=3, sticky="nsew", padx=1, pady=1)
+            action_frame.grid_columnconfigure(0, weight=1)
+            action_frame.grid_columnconfigure(1, weight=1)
+
+            btn_acc = ctk.CTkButton(action_frame, text="✅ Setuju", width=60, height=28, 
+                                    fg_color="#27ae60", hover_color="#2ecc71",
+                                    command=lambda i=id_trans: self.approve_peminjaman(i))
+            btn_acc.grid(row=0, column=0, padx=2, pady=5)
+
+            btn_rej = ctk.CTkButton(action_frame, text="❌ Tolak", width=60, height=28, 
+                                    fg_color="#c0392b", hover_color="#e74c3c",
+                                    command=lambda i=id_trans: self.reject_peminjaman(i))
+            btn_rej.grid(row=0, column=1, padx=2, pady=5)
+
+    def approve_peminjaman(self, id_trans):
+        dialog = ctk.CTkInputDialog(text="Tulis Detail Kerusakan (Contoh: Hal 10 Sobek):", title="Konfirmasi Kerusakan")
+        catatan_admin = dialog.get_input()
+        
+        if catatan_admin: 
+            if self.controller.db.verifikasi_buku(id_trans, 'APPROVED', catatan_admin):
+                self.load_data() # Refresh tabel
+
+    def reject_peminjaman(self, id_trans):
+        if self.controller.db.verifikasi_buku(id_trans, 'REJECTED'):
+            self.load_data() # Refresh tabel
+            
 # --- 5. MAIN CONTROLLER ---
 class SmartLibraryApp(ctk.CTk):
     def __init__(self):
@@ -1151,7 +1353,7 @@ class SmartLibraryApp(ctk.CTk):
 
         self.frames = {}
         # masukkan PageLanding, PageLogin, dan PageAktivasi
-        for F in (PageLanding, PageLogin, PageAktivasi, PageFaceAuth, PageMenu, PageAdminDaftar, PageAdminBuku,  PagePeminjaman, PagePengembalian, PageRiwayatUser, PageAdminLaporan, PageAdminDenda):
+        for F in (PageLanding, PageLogin, PageAktivasi, PageFaceAuth, PageMenu, PageAdminDaftar, PageAdminBuku,  PagePeminjaman, PageRiwayatUser, PageAdminLaporan, PageAdminDenda, PageVerifikasi, PagePengembalianAdmin):
             page_name = F.__name__
             frame = F(parent=self.container, controller=self)
             self.frames[page_name] = frame
