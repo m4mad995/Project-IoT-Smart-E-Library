@@ -78,6 +78,19 @@ def buat_tabel_lengkap():
             prodi TEXT NOT NULL
         )
     """)
+    
+    # ==========================================
+    # 3. TAMBAH TABEL LOG AKTIVITAS
+    # ==========================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS presensi (
+            id_presensi INTEGER PRIMARY KEY AUTOINCREMENT,
+            rfid_id TEXT,
+            nama TEXT,
+            waktu_masuk DATETIME,
+            keperluan TEXT DEFAULT 'Membaca/Belajar'
+        )
+    """)
 
     # Masukkan data dummy jika tabelnya masih kosong
     data_dummy = [

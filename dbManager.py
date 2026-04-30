@@ -346,65 +346,6 @@ class DBManager:
         conn.close()
         return res
 
-    def kembalikan_buku(self, rfid_id, barcode_id, id_transaksi, tgl_pinjam_str):
-        """Memproses pengembalian, cek denda otomatis, dan blokir jika telat"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # 1. AMBIL DURASI MAKSIMAL BUKU INI (Default 7 hari jika kosong)
-            cursor.execute("SELECT durasi_pinjam FROM buku WHERE barcode_id=?", (barcode_id,))
-            buku_data = cursor.fetchone()
-            durasi_maksimal = int(buku_data[0]) if buku_data and buku_data[0] is not None else 7
-            
-            # 👇 TAMBAHKAN BARIS INI UNTUK TESTING 👇
-            # durasi_maksimal = -1  
-            # ⚠️ JANGAN LUPA DIHAPUS KALAU APLIKASI MAU DIPAKAI ASLI!
-            
-            # 2. HITUNG SELISIH HARI (Pastikan format tanggal tidak error)
-            try:
-                tgl_pinjam = datetime.strptime(tgl_pinjam_str[:19], "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                # Fallback kalau format di DB cuma YYYY-MM-DD
-                tgl_pinjam = datetime.strptime(tgl_pinjam_str[:10], "%Y-%m-%d")
-                
-            tgl_sekarang = datetime.now()
-            selisih_hari = (tgl_sekarang - tgl_pinjam).days
-            
-            tarif_denda = 1000 
-            total_denda = 0
-            status_denda_val = 'LUNAS'
-            hari_telat = 0
-            
-            # 3. JIKA TELAT (Kena Denda & Blokir)
-            if selisih_hari > durasi_maksimal:
-                hari_telat = selisih_hari - durasi_maksimal
-                total_denda = hari_telat * tarif_denda
-                status_denda_val = 'BELUM LUNAS'
-                
-                # BLOKIR AKUN USER KARENA DENDA
-                cursor.execute("UPDATE anggota SET status = 'DIBLOKIR' WHERE rfid_id = ?", (rfid_id,))
-                
-            # 4. UPDATE TABEL TRANSAKSI
-            waktu_kembali_str = tgl_sekarang.strftime("%Y-%m-%d %H:%M:%S")
-            cursor.execute("""
-                UPDATE transaksi 
-                SET tgl_kembali = ?, denda = ?, status_denda = ? 
-                WHERE id_transaksi = ?
-            """, (waktu_kembali_str, total_denda, status_denda_val, id_transaksi))
-            
-            # 5. KEMBALIKAN STOK BUKU (+1)
-            cursor.execute("UPDATE buku SET stok = stok + 1 WHERE barcode_id=?", (barcode_id,))
-            
-            conn.commit()
-            conn.close()
-            
-            # Return hari_telat agar bisa dimunculkan di notif UI nanti
-            return True, total_denda, hari_telat 
-            
-        except Exception as e:
-            print(f"🚨 Error Database Pengembalian: {e}")
-            return False, 0, 0
         
     def get_riwayat_user(self, rfid_id):
         """Mengambil riwayat peminjaman buku berdasarkan rfid_id user"""
@@ -688,7 +629,44 @@ class DBManager:
             cursor.execute("SELECT rfid_id, nama, prodi, role FROM anggota WHERE ROWID = ?", (user_id,))
             data = cursor.fetchone()
             conn.close()
+            
             return data
         except Exception as e:
             print(f"Error Get Anggota by ID: {e}")
             return None
+        
+    def catat_presensi(self, rfid_id, nama, keperluan="Membaca/Belajar"):
+        try:
+            from datetime import datetime
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            waktu_sekarang = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            query = """
+                INSERT INTO presensi (rfid_id, nama, waktu_masuk, keperluan)
+                VALUES (?, ?, ?, ?)
+            """
+            cursor.execute(query, (rfid_id, nama, waktu_sekarang, keperluan))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error Simpan Presensi: {e}")
+            return False
+
+    def get_log_presensi(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Ambil data terbaru di urutan paling atas
+            cursor.execute("SELECT * FROM presensi ORDER BY waktu_masuk DESC")
+            rows = cursor.fetchall()
+            
+            conn.close()
+            return rows
+        except Exception as e:
+            print(f"Error Get Log Presensi: {e}")
+            return []
