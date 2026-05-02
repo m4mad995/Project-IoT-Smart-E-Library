@@ -13,8 +13,8 @@ class DBManager:
         # 2. SCRIPT AUTO-PATCH DATABASE ANTI-GAGAL
         # ==========================================
         try:
-            conn = sqlite3.connect(self.db_path)
-            
+            conn = sqlite3.connect(self.db_path, timeout=10) # Tambahkan timeout untuk menghindari error "database is locked"
+            conn.execute("PRAGMA journal_mode=WAL;")
             # Daftar semua kolom yang mau ditambahkan
             patch_queries = [
                 "ALTER TABLE transaksi ADD COLUMN status_denda TEXT DEFAULT 'LUNAS'",
@@ -160,23 +160,6 @@ class DBManager:
             print(f"Error Aktivasi: {e}")
             return None
 
-    def add_member(self, rfid, nama, prodi, foto_path):
-        """Menambah anggota baru dengan default role USER"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            # Perhatikan: kita tambahkan 'USER' di akhir query INSERT
-            cursor.execute(
-                "INSERT INTO anggota (rfid_id, nama, prodi, foto_path, status, role) VALUES (?, ?, ?, ?, 'AKTIF', 'USER')", 
-                (rfid, nama, prodi, foto_path)
-            )
-            conn.commit()
-            conn.close()
-            return True
-        except Exception as e:
-            print(f"Error DB: {e}")
-            return False
-
     def check_denda(self, rfid_id):
         """Logika Cek Denda dari tabel transaksi"""
         conn = sqlite3.connect(self.db_path)
@@ -277,8 +260,7 @@ class DBManager:
             if not user_data:
                 return "ERROR"
                 
-            if user_data[0] == 'DIBLOKIR':
-                conn.close()
+            if user_data[0] == 'DIBLOKIR' or user_data[0] == 'BLOKIR':
                 return "DIBLOKIR"
                 
             # 2. HITUNG JUMLAH BUKU YANG SEDANG DIPINJAM (LIMIT OTOMATIS)
@@ -286,7 +268,6 @@ class DBManager:
             sedang_dipinjam = cursor.fetchone()[0]
             
             if sedang_dipinjam >= MAX_PINJAM:
-                conn.close()
                 return "LIMIT"
                 
             # 3. CEK STOK & DURASI PINJAM BUKU
@@ -295,7 +276,7 @@ class DBManager:
             
             if buku and int(buku[0]) > 0:
 
-                # 🔥 CEK KONDISI BUKU DULU
+                # 🔥 CEK KONDISI BUKU DULU (Rusak -> Perlu Verifikasi)
                 if kondisi == "Rusak":
                     cursor.execute("""
                         INSERT INTO transaksi 
@@ -304,34 +285,37 @@ class DBManager:
                     """, (rfid_id, barcode_id, kondisi, catatan))
                     
                     conn.commit()
-                    conn.close()
                     return "PENDING"
 
-                # 🟢 KONDISI NORMAL (BAIK)
+                # 🟢 KONDISI NORMAL (BAIK) -> Langsung Pinjam
+                # Kurangi stok buku
                 cursor.execute("UPDATE buku SET stok = stok - 1 WHERE barcode_id=?", (barcode_id,))
                 
                 durasi = int(buku[1]) if buku[1] is not None else 7
 
                 cursor.execute(f"""
-                INSERT INTO transaksi 
-                (rfid_id, barcode_id, status_denda, tgl_pinjam, jatuh_tempo, kondisi_awal, status_verifikasi) 
-                VALUES (?, ?, 'LUNAS', datetime('now', 'localtime'), datetime('now', 'localtime', '+{durasi} days'), ?, 'AUTO')
-            """, (rfid_id, barcode_id, kondisi))
-
+                    INSERT INTO transaksi 
+                    (rfid_id, barcode_id, status_denda, tgl_pinjam, jatuh_tempo, kondisi_awal, status_verifikasi) 
+                    VALUES (?, ?, 'LUNAS', datetime('now', 'localtime'), datetime('now', 'localtime', '+{durasi} days'), ?, 'AUTO')
+                """, (rfid_id, barcode_id, kondisi))
 
                 conn.commit() 
-                conn.close()
                 return "SUKSES"
             
             else:
-                conn.close()
                 return "HABIS"
         
         except Exception as e:
             print(f"Error pinjam buku: {e}")
             if conn:
-                conn.close()
+                conn.rollback() # Membatalkan transaksi jika error di tengah jalan agar database tidak korup
             return "ERROR"
+            
+        finally:
+            # 🛡️ BAGIAN TERPENTING:
+            # Blok ini AKAN SELALU DIJALANKAN baik ketika sukses, return limit, return diblokir, maupun saat error.
+            if conn:
+                conn.close()
         
     def get_transaksi_aktif(self, rfid_id, barcode_id):
         """Mengecek apakah user sedang meminjam buku ini (belum dikembalikan)"""
@@ -437,58 +421,60 @@ class DBManager:
             return False
         
     def get_dashboard_stats(self):
-        """Mengambil rekapitulasi data (Sekarang 6 Statistik)"""
+        """Mengambil rekapitulasi data yang akurat (Sinkron dengan logic sistem)"""
         total_stok = 0
         total_judul = 0
         total_anggota = 0
         buku_dipinjam = 0
         anggota_terblokir = 0
-        antrean_aktivasi = 0 # <-- 1. Variabel Baru Disiapkan
+        antrean_aktivasi = 0
+        antrean_verifikasi = 0 # Tambahan untuk badge verifikasi buku
 
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        # 1. Hitung Stok & Judul sekaligus
         try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # 1. Hitung Stok & Judul sekaligus
             cursor.execute("SELECT SUM(stok), COUNT(*) FROM buku")
             res = cursor.fetchone()
             total_stok = res[0] if res[0] is not None else 0
             total_judul = res[1] if res[1] is not None else 0
-        except Exception as e:
-            print(f"Error Hitung Buku: {e}")
 
-        # 2. Total Anggota
-        try:
+            # 2. Total Anggota (Selain Admin)
             cursor.execute("SELECT COUNT(*) FROM anggota WHERE role != 'ADMIN'")
             total_anggota = cursor.fetchone()[0]
-        except Exception as e:
-            print(f"Error Hitung Anggota: {e}")
 
-        # 3. Buku Dipinjam
-        try:
+            # 3. Buku Dipinjam (Berdasarkan tgl_kembali yang kosong)
             cursor.execute("SELECT COUNT(*) FROM transaksi WHERE tgl_kembali IS NULL")
             buku_dipinjam = cursor.fetchone()[0]
-        except Exception as e:
-            print(f"Error Hitung Dipinjam: {e}")
 
-        # 5. Hitung Antrean Aktivasi
-        try:
+            # 4. Hitung Antrean Aktivasi (Tabel calon_anggota)
             cursor.execute("SELECT COUNT(*) FROM calon_anggota")
             antrean_aktivasi = cursor.fetchone()[0]
-        except Exception as e:
-            print(f"Error Hitung Antrean: {e}")
+            
+            # 5. Antrean Verifikasi (Status PENDING)
+            cursor.execute("SELECT COUNT(*) FROM transaksi WHERE status_verifikasi = 'PENDING'")
+            antrean_verifikasi = cursor.fetchone()[0]
 
-        conn.close() # <-- Pastikan tambahan baru di atas baris ini
+            conn.close()
 
-        # 6. Anggota Terblokir (dari halaman denda)
-        try:
+            # 6. Anggota Terblokir (Memanggil fungsi existing)
             data_terblokir = self.get_user_terblokir()
             anggota_terblokir = len(data_terblokir) if data_terblokir else 0
+
         except Exception as e:
-            print(f"Error Hitung Terblokir: {e}")
-            
-        # --- RETURN 6 NILAI SEKARANG ---
-        return (total_stok, total_judul, total_anggota, buku_dipinjam, anggota_terblokir, antrean_aktivasi)  
+            print(f"Error Dashboard Stats: {e}")
+
+        # Mengembalikan dalam format Dictionary agar mudah dipetakan di UI
+        return {
+            "stok": total_stok, 
+            "judul": total_judul, 
+            "anggota": total_anggota, 
+            "pinjam": buku_dipinjam, 
+            "aktivasi": antrean_aktivasi, 
+            "blokir": anggota_terblokir,
+            "verifikasi": antrean_verifikasi
+        }
   
     #fitur deteksi wajah login berdasarkan ID Angka (ROWID) yang otomatis di-generate SQLite saat insert anggota baru
     def get_anggota_by_rfid(self, rfid_id):
